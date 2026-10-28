@@ -23,7 +23,11 @@ Three public endpoints send real email through Resend with no account required:
 ## Caps
 
 - **Per email:** 3 sends / 15 minutes — across **all** routes combined.
-- **Per IP:** 10 requests / hour — IP stored only as a SHA-256 hash.
+- **Per IP:** 10 requests / hour — IP stored only as an HMAC-SHA256 keyed by
+  the server-only `RATE_LIMIT_IP_KEY` secret (AO-2085). Every app that imports
+  this package must set that secret, with a different value per environment.
+  Without it the package refuses to rate-limit by IP at all (the per-email
+  cap still applies) rather than fall back to an unkeyed hash.
 
 All three routes count against **one shared table**
 (`public.auth_email_request_log`, created by migration `0209` in
@@ -52,7 +56,7 @@ if (!allowed) return genericResponse() // over a cap → respond, do not send
 Add as a pinned git dependency (same mechanism as `@comet/ui`):
 
 ```json
-"@comet/auth-rate-limit": "git+https://github.com/mmcdaniel-saber/comet-auth-rate-limit.git#v0.1.0"
+"@comet/auth-rate-limit": "git+https://github.com/mmcdaniel-saber/comet-auth-rate-limit.git#v0.2.0"
 ```
 
 `next` and `@supabase/supabase-js` are **peer dependencies** and are used only

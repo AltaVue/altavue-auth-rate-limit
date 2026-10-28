@@ -22,8 +22,8 @@
 //                 (Launcher magic-link + reset-password + Portal magic-link
 //                 share the table, so alternating endpoints doesn't help an
 //                 attacker).
-//   • per-IP    : max 10 requests per hour. The IP is stored only as a
-//                 SHA-256 hash.
+//   • per-IP    : max 10 requests per hour. The IP is never stored in a form
+//                 that can be turned back into an address — see below.
 //
 // Under both caps → the request is recorded and allowed. Over either → the
 // route returns its usual generic "if an account exists..." message and
@@ -35,13 +35,25 @@
 // guards cost and abuse, not authentication — a database hiccup must never
 // lock users out of signing in.
 //
+// AO-2085 (28 Oct 2026): the IP used to be stored as a plain SHA-256 hash,
+// which is reversible in minutes — SHA-256 has no secret, so anyone with a
+// copy of the table can hash every possible IPv4 address and match it back.
+// It is now an HMAC-SHA256 keyed by a server-only secret, RATE_LIMIT_IP_KEY,
+// set as an environment variable on every app that imports this package.
+// Without that secret the stored values cannot be reversed; rotating it only
+// resets everyone's rate-limit window. If the secret is missing, this package
+// refuses to rate-limit by IP at all (the per-email cap still applies) and
+// logs a loud error — it never falls back to the old unkeyed hash.
+//
 // This package ships raw TypeScript (no build step) and is consumed as a
 // pinned git dependency, exactly like @comet/ui. `next` and
 // @supabase/supabase-js are peer dependencies and are only used for types.
 
-import { createHash } from 'crypto'
+import { createHmac } from 'crypto'
 import type { NextRequest } from 'next/server'
 import type { SupabaseClient } from '@supabase/supabase-js'
+
+const RATE_LIMIT_IP_KEY_ENV = 'RATE_LIMIT_IP_KEY'
 
 export const AUTH_EMAIL_LIMIT = 3 // sends per email
 export const AUTH_EMAIL_WINDOW_MS = 15 * 60 * 1000 // 15 minutes
@@ -57,15 +69,29 @@ export type AuthEmailRoute =
   | 'portal-magic-link'
 
 /**
- * Extract the caller's IP from the proxy headers Vercel sets and hash it.
- * Returns null when no header is present (the email cap still applies).
- * Raw IPs are never stored or logged.
+ * Extract the caller's IP from the proxy headers Vercel sets and return a
+ * keyed HMAC-SHA256 of it, using the server-only RATE_LIMIT_IP_KEY secret.
+ * Returns null when no IP header is present, OR when the secret is not
+ * configured — in both cases the per-IP cap is skipped for this request and
+ * only the per-email cap applies. Raw IPs are never stored or logged, and a
+ * missing secret never falls back to an unkeyed hash.
  */
 export function hashClientIp(req: NextRequest): string | null {
   const forwarded = req.headers.get('x-forwarded-for')
   const ip = forwarded?.split(',')[0]?.trim() || req.headers.get('x-real-ip')?.trim() || ''
   if (!ip) return null
-  return createHash('sha256').update(ip).digest('hex')
+
+  const key = process.env[RATE_LIMIT_IP_KEY_ENV]
+  if (!key) {
+    console.error(
+      `[auth-email-rate-limit] ${RATE_LIMIT_IP_KEY_ENV} is not set — refusing to rate-limit ` +
+        'by IP for this request (the per-email cap still applies). Set this secret in every ' +
+        'environment before relying on the per-IP cap.'
+    )
+    return null
+  }
+
+  return createHmac('sha256', key).update(ip).digest('hex')
 }
 
 /**
